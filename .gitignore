@@ -12,10 +12,10 @@ Cargo.lock
 
 # Added by cargo
 
-/target
-/Cargo.lock
+target
+Cargo.lock
 
-/.idea
-/.vscode
+.idea
+.vscode
 
 neardev
