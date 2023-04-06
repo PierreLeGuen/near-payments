@@ -1,13 +1,16 @@
 use std::collections::HashSet;
 
+use escrow::EscrowTransfer;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::{LookupMap, UnorderedMap, UnorderedSet};
 use near_sdk::json_types::{Base64VecU8, U128, U64};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{
-    env, near_bindgen, serde_json, AccountId, BorshStorageKey, Gas, PanicOnDefault, Promise,
-    PromiseOrValue, PublicKey,
+    env, near_bindgen, serde_json, AccountId, BorshStorageKey, CryptoHash, Gas, PanicOnDefault,
+    Promise, PromiseOrValue, PublicKey,
 };
+
+pub mod escrow;
 
 /// Unlimited allowance for multisig keys.
 const DEFAULT_ALLOWANCE: u128 = 0;
@@ -38,8 +41,6 @@ pub struct FunctionCallPermission {
 #[cfg_attr(test, derive(PartialEq, Clone))]
 #[serde(tag = "type", crate = "near_sdk::serde")]
 pub enum MultiSigRequestAction {
-    /// Transfers given amount to receiver.
-    Transfer { amount: U128 },
     /// Create a new account.
     CreateAccount,
     /// Deploys contract to receiver's account. Can upgrade given contract as well.
@@ -54,13 +55,6 @@ pub enum MultiSigRequestAction {
         #[serde(skip_serializing_if = "Option::is_none")]
         permission: Option<FunctionCallPermission>,
     },
-    /// Call function on behalf of this contract.
-    FunctionCall {
-        method_name: String,
-        args: Base64VecU8,
-        deposit: U128,
-        gas: U64,
-    },
     /// Sets number of confirmations required to authorize requests.
     /// Can not be bundled with any other actions or transactions.
     SetNumConfirmations { num_confirmations: u32 },
@@ -69,6 +63,16 @@ pub enum MultiSigRequestAction {
     /// The REQUEST_COOLDOWN for requests is 15min
     /// Worst gas attack a malicious keyholder could do is 12 requests every 15min
     SetActiveRequestsLimit { active_requests_limit: u32 },
+    /// Payment options
+    /// Transfers given amount to receiver.
+    Transfer { amount: U128 },
+    /// NEAR Escrow transfer
+    EscrowTransfer {
+        receiver_id: AccountId,
+        amount: U128,
+        label: String,
+        is_cancellable: bool,
+    },
 }
 
 /// The request the user makes specifying the receiving account and actions they want to execute (1 tx)
@@ -110,11 +114,21 @@ pub enum StorageKeys {
     Requests,
     Confirmations,
     NumRequestsPk,
+    FtCommittedBalances,
+    EscrowTransfers,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
+#[cfg_attr(test, derive(PartialEq, Clone))]
+#[serde(crate = "near_sdk::serde")]
+pub enum MultisigResponse {
+    Default(bool),
+    EscrowPayment(CryptoHash),
 }
 
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
-pub struct MultiSigContract {
+pub struct Contract {
     /// Members of the multisig.
     members: UnorderedSet<MultisigMember>,
     /// Number of confirmations required.
@@ -129,6 +143,15 @@ pub struct MultiSigContract {
     num_requests_pk: LookupMap<String, u32>,
     /// Limit number of active requests per member.
     active_requests_limit: u32,
+
+    /// Payments
+    ///
+    /// Committed balance in escrow transfers.
+    near_committed_balance: u128,
+    ft_committed_balance: UnorderedMap<AccountId, u128>,
+
+    /// Pending escrow transfers.
+    escrow_transfers: UnorderedMap<CryptoHash, EscrowTransfer>,
 }
 
 #[inline]
@@ -139,7 +162,7 @@ fn assert(condition: bool, error: &str) {
 }
 
 #[near_bindgen]
-impl MultiSigContract {
+impl Contract {
     /// Initialize multisig contract.
     /// @params members: list of {"account_id": "name"} or {"public_key": "key"} members.
     /// @params num_confirmations: k of n signatures required to perform operations.
@@ -157,6 +180,9 @@ impl MultiSigContract {
             confirmations: LookupMap::new(StorageKeys::Confirmations),
             num_requests_pk: LookupMap::new(StorageKeys::NumRequestsPk),
             active_requests_limit: ACTIVE_REQUESTS_LIMIT,
+            near_committed_balance: 0,
+            ft_committed_balance: UnorderedMap::new(StorageKeys::FtCommittedBalances),
+            escrow_transfers: UnorderedMap::new(StorageKeys::EscrowTransfers),
         };
         let mut promise = Promise::new(env::current_account_id());
         for member in members {
@@ -220,13 +246,12 @@ impl MultiSigContract {
         self.remove_request(request_id);
     }
 
-    fn execute_request(&mut self, request: MultiSigRequest) -> PromiseOrValue<bool> {
+    fn execute_request(&mut self, request: MultiSigRequest) -> PromiseOrValue<MultisigResponse> {
         let mut promise = Promise::new(request.receiver_id.clone());
         let receiver_id = request.receiver_id.clone();
         let num_actions = request.actions.len();
         for action in request.actions {
             promise = match action {
-                MultiSigRequestAction::Transfer { amount } => promise.transfer(amount.into()),
                 MultiSigRequestAction::CreateAccount => promise.create_account(),
                 MultiSigRequestAction::DeployContract { code } => {
                     promise.deploy_contract(code.into())
@@ -259,29 +284,49 @@ impl MultiSigContract {
                         promise.add_full_access_key(public_key)
                     }
                 }
-                MultiSigRequestAction::FunctionCall {
-                    method_name,
-                    args,
-                    deposit,
-                    gas,
-                } => promise.function_call(
-                    method_name,
-                    args.into(),
-                    deposit.into(),
-                    Gas::from(gas.0),
-                ),
                 // the following methods must be a single action
                 MultiSigRequestAction::SetNumConfirmations { num_confirmations } => {
                     self.assert_one_action_only(receiver_id, num_actions);
                     self.num_confirmations = num_confirmations;
-                    return PromiseOrValue::Value(true);
+                    return PromiseOrValue::Value(MultisigResponse::Default(true));
                 }
                 MultiSigRequestAction::SetActiveRequestsLimit {
                     active_requests_limit,
                 } => {
                     self.assert_one_action_only(receiver_id, num_actions);
                     self.active_requests_limit = active_requests_limit;
-                    return PromiseOrValue::Value(true);
+                    return PromiseOrValue::Value(MultisigResponse::Default(true));
+                }
+
+                // Payments
+                MultiSigRequestAction::Transfer { amount } => {
+                    // check if there is enough balance accounuting commited balance
+                    let available: u128 = env::account_balance() - self.near_committed_balance;
+
+                    assert!(
+                        amount.0 <= available,
+                        "Not enough balance to transfer. Available: {}, requested: {}",
+                        available,
+                        amount.0
+                    );
+
+                    promise.transfer(amount.into())
+                }
+                MultiSigRequestAction::EscrowTransfer {
+                    receiver_id,
+                    amount,
+                    label,
+                    is_cancellable,
+                } => {
+                    let res = self.create_near_escrow_payment(
+                        receiver_id,
+                        amount.into(),
+                        label,
+                        is_cancellable,
+                    );
+                    let id =
+                        res.unwrap_or_else(|_| env::panic_str("Failed to create escrow payment"));
+                    return PromiseOrValue::Value(MultisigResponse::EscrowPayment(id));
                 }
             };
         }
@@ -290,7 +335,7 @@ impl MultiSigContract {
 
     /// Confirm given request with given signing key.
     /// If with this, there has been enough confirmation, a promise with request will be scheduled.
-    pub fn confirm(&mut self, request_id: RequestId) -> PromiseOrValue<bool> {
+    pub fn confirm(&mut self, request_id: RequestId) -> PromiseOrValue<MultisigResponse> {
         self.assert_valid_request(request_id);
         let member = self
             .current_member()
@@ -309,7 +354,7 @@ impl MultiSigContract {
         } else {
             confirmations.insert(member.to_string());
             self.confirmations.insert(&request_id, &confirmations);
-            PromiseOrValue::Value(true)
+            PromiseOrValue::Value(MultisigResponse::Default(true))
         }
     }
 
@@ -471,11 +516,6 @@ impl MultiSigContract {
     pub fn get_request_nonce(&self) -> u32 {
         self.request_nonce
     }
-
-    pub fn here(self) -> bool {
-        env::log_str("transfer_promise");
-        true
-    }
 }
 
 #[cfg(test)]
@@ -576,7 +616,7 @@ mod tests {
                 .unwrap(),
             amount
         ));
-        let mut c = MultiSigContract::new(members(), 3);
+        let mut c = Contract::new(members(), 3);
         let request = MultiSigRequest {
             receiver_id: bob(),
             actions: vec![MultiSigRequestAction::Transfer {
@@ -613,7 +653,7 @@ mod tests {
                 .unwrap(),
             amount
         ));
-        let mut c = MultiSigContract::new(members(), 3);
+        let mut c = Contract::new(members(), 3);
         let request = MultiSigRequest {
             receiver_id: bob(),
             actions: vec![MultiSigRequestAction::Transfer {
@@ -650,7 +690,7 @@ mod tests {
                 .unwrap(),
             amount
         ));
-        let mut c = MultiSigContract::new(members(), 1);
+        let mut c = Contract::new(members(), 1);
         let new_key: PublicKey = "HghiythFFPjVXwc9BLNi8uqFmfQc1DWFrJQ4nE6ANo7R"
             .parse()
             .unwrap();
@@ -709,7 +749,7 @@ mod tests {
             PublicKey::try_from(Vec::from("Eg2jtsiMrprn7zgKKUk79qM1hWhANsFyE6JSX4txLEuy")).unwrap(),
             amount
         ));
-        let mut c = MultiSigContract::new(members(), 1);
+        let mut c = Contract::new(members(), 1);
         let new_key: PublicKey =
             PublicKey::try_from(Vec::from("HghiythFFPjVXwc9BLNi8uqFmfQc1DWFrJQ4nE6ANo7R")).unwrap();
         // vm current_account_id is alice, receiver_id must be alice
@@ -731,7 +771,7 @@ mod tests {
             PublicKey::try_from(TEST_KEY.to_vec()).unwrap(),
             amount
         ));
-        let mut c = MultiSigContract::new(members(), 1);
+        let mut c = Contract::new(members(), 1);
         let request_id = c.add_request(MultiSigRequest {
             receiver_id: alice(),
             actions: vec![MultiSigRequestAction::SetNumConfirmations {
@@ -750,7 +790,7 @@ mod tests {
             PublicKey::try_from(TEST_KEY.to_vec()).unwrap(),
             amount
         ));
-        let mut c = MultiSigContract::new(members(), 3);
+        let mut c = Contract::new(members(), 3);
         let request_id = c.add_request(MultiSigRequest {
             receiver_id: bob(),
             actions: vec![MultiSigRequestAction::Transfer {
@@ -772,7 +812,7 @@ mod tests {
             PublicKey::try_from(TEST_KEY.to_vec()).unwrap(),
             amount
         ));
-        let mut c = MultiSigContract::new(members(), 3);
+        let mut c = Contract::new(members(), 3);
         let request_id = c.add_request(MultiSigRequest {
             receiver_id: bob(),
             actions: vec![MultiSigRequestAction::Transfer {
@@ -789,7 +829,7 @@ mod tests {
             PublicKey::try_from(TEST_KEY.to_vec()).unwrap(),
             amount
         ));
-        let mut c = MultiSigContract::new(members(), 3);
+        let mut c = Contract::new(members(), 3);
         let request_id = c.add_request(MultiSigRequest {
             receiver_id: bob(),
             actions: vec![MultiSigRequestAction::Transfer {
@@ -814,7 +854,7 @@ mod tests {
             PublicKey::try_from(TEST_KEY.to_vec()).unwrap(),
             amount
         ));
-        let mut c = MultiSigContract::new(members(), 3);
+        let mut c = Contract::new(members(), 3);
         let request_id = c.add_request(MultiSigRequest {
             receiver_id: bob(),
             actions: vec![MultiSigRequestAction::Transfer {
@@ -836,7 +876,7 @@ mod tests {
             PublicKey::try_from(TEST_KEY.to_vec()).unwrap(),
             amount
         ));
-        let mut c = MultiSigContract::new(members(), 3);
+        let mut c = Contract::new(members(), 3);
         for _i in 0..16 {
             c.add_request(MultiSigRequest {
                 receiver_id: bob(),
@@ -854,6 +894,6 @@ mod tests {
             PublicKey::try_from(TEST_KEY.to_vec()).unwrap(),
             1_000
         ));
-        let _ = MultiSigContract::new(members(), 5);
+        let _ = Contract::new(members(), 5);
     }
 }
