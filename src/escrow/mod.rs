@@ -1,7 +1,6 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::collections::{LookupMap, UnorderedMap, UnorderedSet};
 use near_sdk::{
-    serde::{self, Deserialize, Serialize},
+    serde::{Deserialize, Serialize},
     AccountId, CryptoHash,
 };
 

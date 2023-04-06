@@ -10,6 +10,7 @@ use near_sdk::{
     Promise, PromiseOrValue, PublicKey,
 };
 
+pub mod common;
 pub mod escrow;
 
 /// Unlimited allowance for multisig keys.
