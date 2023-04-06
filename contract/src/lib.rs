@@ -3,11 +3,11 @@ use std::collections::HashSet;
 use escrow::EscrowTransfer;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::{LookupMap, UnorderedMap, UnorderedSet};
-use near_sdk::json_types::{Base64VecU8, U128, U64};
+use near_sdk::json_types::{Base64VecU8, U128};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{
-    env, near_bindgen, serde_json, AccountId, BorshStorageKey, CryptoHash, Gas, PanicOnDefault,
-    Promise, PromiseOrValue, PublicKey,
+    env, near_bindgen, serde_json, AccountId, BorshStorageKey, CryptoHash, PanicOnDefault, Promise,
+    PromiseOrValue, PublicKey,
 };
 
 pub mod common;
