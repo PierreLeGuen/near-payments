@@ -9,3 +9,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 near-sdk = "4.1.1"
+models = { path = "../models" }

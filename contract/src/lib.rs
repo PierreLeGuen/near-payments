@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use escrow::EscrowTransfer;
+use models::*;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::{LookupMap, UnorderedMap, UnorderedSet};
 use near_sdk::json_types::{Base64VecU8, U128};
@@ -25,66 +26,6 @@ const ACTIVE_REQUESTS_LIMIT: u32 = 12;
 /// Default set of methods that access key should have.
 const MULTISIG_METHOD_NAMES: &str = "add_request,delete_request,confirm,add_and_confirm_request";
 
-pub type RequestId = u32;
-
-/// Permissions for function call access key.
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
-#[cfg_attr(test, derive(PartialEq, Clone))]
-#[serde(crate = "near_sdk::serde")]
-pub struct FunctionCallPermission {
-    allowance: Option<U128>,
-    receiver_id: AccountId,
-    method_names: Vec<String>,
-}
-
-/// Lowest level action that can be performed by the multisig contract.
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
-#[cfg_attr(test, derive(PartialEq, Clone))]
-#[serde(tag = "type", crate = "near_sdk::serde")]
-pub enum MultiSigRequestAction {
-    /// Create a new account.
-    CreateAccount,
-    /// Deploys contract to receiver's account. Can upgrade given contract as well.
-    DeployContract { code: Base64VecU8 },
-    /// Add new member of the multisig.
-    AddMember { member: MultisigMember },
-    /// Remove existing member of the multisig.
-    DeleteMember { member: MultisigMember },
-    /// Adds full access key to another account.
-    AddKey {
-        public_key: PublicKey,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        permission: Option<FunctionCallPermission>,
-    },
-    /// Sets number of confirmations required to authorize requests.
-    /// Can not be bundled with any other actions or transactions.
-    SetNumConfirmations { num_confirmations: u32 },
-    /// Sets number of active requests (unconfirmed requests) per access key
-    /// Default is 12 unconfirmed requests at a time
-    /// The REQUEST_COOLDOWN for requests is 15min
-    /// Worst gas attack a malicious keyholder could do is 12 requests every 15min
-    SetActiveRequestsLimit { active_requests_limit: u32 },
-    /// Payment options
-    /// Transfers given amount to receiver.
-    Transfer { amount: U128 },
-    /// NEAR Escrow transfer
-    EscrowTransfer {
-        receiver_id: AccountId,
-        amount: U128,
-        label: String,
-        is_cancellable: bool,
-    },
-}
-
-/// The request the user makes specifying the receiving account and actions they want to execute (1 tx)
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
-#[cfg_attr(test, derive(PartialEq, Clone))]
-#[serde(crate = "near_sdk::serde")]
-pub struct MultiSigRequest {
-    receiver_id: AccountId,
-    actions: Vec<MultiSigRequestAction>,
-}
-
 /// An internal request wrapped with the signer_pk and added timestamp to determine num_requests_pk and prevent against malicious key holder gas attacks
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
 #[cfg_attr(test, derive(PartialEq, Clone))]
@@ -93,20 +34,6 @@ pub struct MultiSigRequestWithSigner {
     request: MultiSigRequest,
     member: MultisigMember,
     added_timestamp: u64,
-}
-
-/// Represents member of the multsig: either account or access key to given account.
-#[derive(Debug, BorshDeserialize, BorshSerialize, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(crate = "near_sdk::serde", untagged)]
-pub enum MultisigMember {
-    AccessKey { public_key: PublicKey },
-    Account { account_id: AccountId },
-}
-
-impl ToString for MultisigMember {
-    fn to_string(&self) -> String {
-        serde_json::to_string(&self).unwrap_or_else(|_| env::panic_str("Failed to serialize"))
-    }
 }
 
 #[derive(BorshStorageKey, BorshSerialize)]
@@ -123,6 +50,7 @@ pub enum StorageKeys {
 #[cfg_attr(test, derive(PartialEq, Clone))]
 #[serde(crate = "near_sdk::serde")]
 pub enum MultisigResponse {
+    AddRequest(RequestId),
     Default(bool),
     EscrowPayment(CryptoHash),
 }
@@ -193,7 +121,7 @@ impl Contract {
     }
 
     /// Add request for multisig.
-    pub fn add_request(&mut self, request: MultiSigRequest) -> RequestId {
+    pub fn add_request(&mut self, request: MultiSigRequest) -> MultisigResponse {
         let current_member = self.current_member().unwrap_or_else(|| {
             env::panic_str(
                 "Predecessor must be a member or transaction signed with key of given account",
@@ -222,14 +150,21 @@ impl Contract {
         self.confirmations
             .insert(&self.request_nonce, &confirmations);
         self.request_nonce += 1;
-        self.request_nonce - 1
+        MultisigResponse::AddRequest(self.request_nonce - 1)
     }
 
     /// Add request for multisig and confirm with the pk that added.
-    pub fn add_request_and_confirm(&mut self, request: MultiSigRequest) -> RequestId {
-        let request_id = self.add_request(request);
-        self.confirm(request_id);
-        request_id
+    pub fn add_request_and_confirm(&mut self, request: MultiSigRequest) -> MultisigResponse {
+        let request_id_resp = self.add_request(request);
+        let id = match request_id_resp {
+            MultisigResponse::AddRequest(id) => id,
+            _ => env::panic_str("Unexpected response"),
+        };
+        let res = self.confirm(id);
+        match res {
+            PromiseOrValue::Value(v) => return v,
+            _ => return request_id_resp,
+        };
     }
 
     /// Remove given request and associated confirmations.
@@ -530,14 +465,6 @@ mod tests {
 
     use super::*;
 
-    /// Used for asserts_eq.
-    /// TODO: replace with derive when https://github.com/near/near-sdk-rs/issues/165
-    impl Debug for MultiSigRequest {
-        fn fmt(&self, _f: &mut Formatter<'_>) -> Result<(), Error> {
-            panic!("Should not trigger");
-        }
-    }
-
     pub fn alice() -> AccountId {
         AccountId::new_unchecked("alice".to_string())
     }
@@ -624,7 +551,11 @@ mod tests {
                 amount: amount.into(),
             }],
         };
-        let request_id = c.add_request(request.clone());
+        let request_id = if let MultisigResponse::AddRequest(a) = c.add_request(request.clone()) {
+            a
+        } else {
+            panic!("Expected AddRequest");
+        };
         assert_eq!(c.get_request(request_id), request);
         assert_eq!(c.list_request_ids(), vec![request_id]);
         c.confirm(request_id);
@@ -662,6 +593,11 @@ mod tests {
             }],
         };
         let request_id = c.add_request_and_confirm(request.clone());
+        let request_id = match request_id {
+            MultisigResponse::AddRequest(a) => a,
+            MultisigResponse::Default(bool) => panic!("Expected AddRequest, got {:?}", bool),
+            MultisigResponse::EscrowPayment(_) => todo!(),
+        };
         assert_eq!(c.get_request(request_id), request);
         assert_eq!(c.list_request_ids(), vec![request_id]);
         // c.confirm(request_id);
@@ -779,6 +715,13 @@ mod tests {
                 num_confirmations: 2,
             }],
         });
+
+        let request_id = if let MultisigResponse::AddRequest(id) = request_id {
+            id
+        } else {
+            panic!("wrong response");
+        };
+
         c.confirm(request_id);
         assert_eq!(c.num_confirmations, 2);
     }
@@ -798,6 +741,12 @@ mod tests {
                 amount: amount.into(),
             }],
         });
+        let request_id = if let MultisigResponse::AddRequest(id) = request_id {
+            id
+        } else {
+            panic!("wrong response");
+        };
+
         assert_eq!(c.requests.len(), 1);
         assert_eq!(c.confirmations.get(&request_id).unwrap().len(), 0);
         c.confirm(request_id);
@@ -820,6 +769,11 @@ mod tests {
                 amount: amount.into(),
             }],
         });
+        let request_id = if let MultisigResponse::AddRequest(id) = request_id {
+            id
+        } else {
+            panic!("wrong response");
+        };
         c.delete_request(request_id);
     }
 
@@ -837,6 +791,13 @@ mod tests {
                 amount: amount.into(),
             }],
         });
+
+        let request_id = if let MultisigResponse::AddRequest(id) = request_id {
+            id
+        } else {
+            panic!("wrong response");
+        };
+
         c.confirm(request_id);
         testing_env!(context_with_key_future(
             PublicKey::try_from(TEST_KEY.to_vec()).unwrap(),
@@ -862,6 +823,11 @@ mod tests {
                 amount: amount.into(),
             }],
         });
+        let request_id = if let MultisigResponse::AddRequest(id) = request_id {
+            id
+        } else {
+            panic!("wrong response");
+        };
         testing_env!(context_with_key(
             PublicKey::try_from(TEST_KEY.to_vec()).unwrap(),
             amount
