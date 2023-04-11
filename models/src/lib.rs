@@ -1,6 +1,6 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::json_types::{Base64VecU8, U128};
-use near_sdk::{env, serde_json};
+use near_sdk::json_types::{Base58CryptoHash, Base64VecU8, U128};
+use near_sdk::{env, serde_json, CryptoHash, Promise};
 use near_sdk::{
     serde::{Deserialize, Serialize},
     AccountId, PublicKey,
@@ -75,4 +75,30 @@ pub enum MultiSigRequestAction {
 pub struct MultiSigRequest {
     pub receiver_id: AccountId,
     pub actions: Vec<MultiSigRequestAction>,
+}
+
+#[derive(Debug, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+#[cfg_attr(test, derive(PartialEq, Clone))]
+#[serde(crate = "near_sdk::serde")]
+pub enum FuncResponse {
+    AddRequest(RequestId),
+    Default(bool),
+    EscrowPayment(Base58CryptoHash),
+}
+
+#[derive(Debug, BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
+#[cfg_attr(test, derive(PartialEq, Clone))]
+#[serde(crate = "near_sdk::serde")]
+pub struct MultiSigResponse {
+    pub request_id: RequestId,
+    pub response: FuncResponse,
+}
+
+impl MultiSigResponse {
+    pub fn new(request_id: RequestId, response: FuncResponse) -> Self {
+        Self {
+            request_id,
+            response,
+        }
+    }
 }

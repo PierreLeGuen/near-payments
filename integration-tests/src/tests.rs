@@ -1,6 +1,6 @@
 use anyhow::{Ok, Result};
-use near_sdk::{AccountId, ONE_NEAR};
-use near_units::parse_near;
+use near_sdk::{AccountId, Gas, ONE_NEAR};
+
 use serde_json::json;
 use std::{env, fs};
 use workspaces::{Account, Contract};
@@ -19,7 +19,7 @@ impl ContractWrapper {
     async fn init(&self, members: Vec<MultisigMember>, num_confirmations: u128) -> Result<()> {
         let args = json!({
             "members": members,
-            "num_confirmations": 1,
+            "num_confirmations": num_confirmations,
         });
 
         self.contract
@@ -39,14 +39,22 @@ impl ContractWrapper {
         &self,
         from: &Account,
         request: MultiSigRequest,
-    ) -> Result<()> {
-        from.call(self.contract.id(), "add_request_and_confirm")
+    ) -> Result<Option<MultiSigResponse>> {
+        let ret = from
+            .call(self.contract.id(), "add_request_and_confirm")
             .args_json(json!({ "request": request }))
+            .gas(300 * Gas::ONE_TERA.0)
             .transact()
             .await?
             .into_result()?;
 
-        Ok(())
+        let r = if !ret.raw_bytes().unwrap().is_empty() {
+            let q: MultiSigResponse = ret.json().unwrap();
+            Some(q)
+        } else {
+            None
+        };
+        Ok(r)
     }
 }
 
@@ -57,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("deploying contract to sandbox");
     let worker = workspaces::sandbox().await?;
-    let wasm = std::fs::read(wasm_filepath)?;
+    let wasm = fs::read(wasm_filepath)?;
     let contract = worker.dev_deploy(&wasm).await?;
 
     let contract = ContractWrapper::new(contract);
@@ -121,7 +129,14 @@ async fn test_escrow_transfer(
 
     let to_before = to.view_account().await?;
 
-    contract.add_request_and_confirm(from, request).await?;
+    let ret = contract
+        .add_request_and_confirm(from, request)
+        .await?
+        .expect("no response");
+    match ret.response {
+        FuncResponse::EscrowPayment(p) => dbg!(p),
+        _ => panic!("unexpected response"),
+    };
 
     let to_after = to.view_account().await?;
 

@@ -20,7 +20,7 @@ impl Contract {
         let mut buf = env::random_seed();
         buf.append(&mut self.request_nonce.to_le_bytes().to_vec());
 
-        let id = env::sha256(&buf).as_slice().try_into().unwrap();
+        let id: CryptoHash = env::sha256(&buf).as_slice().try_into().unwrap();
         let p = EscrowTransfer {
             id,
             receiver_id,

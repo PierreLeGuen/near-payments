@@ -4,11 +4,11 @@ use escrow::EscrowTransfer;
 use models::*;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::{LookupMap, UnorderedMap, UnorderedSet};
-use near_sdk::json_types::{Base64VecU8, U128};
+
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{
     env, near_bindgen, serde_json, AccountId, BorshStorageKey, CryptoHash, PanicOnDefault, Promise,
-    PromiseOrValue, PublicKey,
+    PromiseOrValue,
 };
 
 pub mod common;
@@ -45,16 +45,6 @@ pub enum StorageKeys {
     FtCommittedBalances,
     EscrowTransfers,
 }
-
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
-#[cfg_attr(test, derive(PartialEq, Clone))]
-#[serde(crate = "near_sdk::serde")]
-pub enum MultisigResponse {
-    AddRequest(RequestId),
-    Default(bool),
-    EscrowPayment(CryptoHash),
-}
-
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct Contract {
@@ -77,6 +67,7 @@ pub struct Contract {
     ///
     /// Committed balance in escrow transfers.
     near_committed_balance: u128,
+    /// Maps FT contracts to committed balance in escrow transfers.
     ft_committed_balance: UnorderedMap<AccountId, u128>,
 
     /// Pending escrow transfers.
@@ -121,7 +112,7 @@ impl Contract {
     }
 
     /// Add request for multisig.
-    pub fn add_request(&mut self, request: MultiSigRequest) -> MultisigResponse {
+    pub fn add_request(&mut self, request: MultiSigRequest) -> MultiSigResponse {
         let current_member = self.current_member().unwrap_or_else(|| {
             env::panic_str(
                 "Predecessor must be a member or transaction signed with key of given account",
@@ -150,21 +141,19 @@ impl Contract {
         self.confirmations
             .insert(&self.request_nonce, &confirmations);
         self.request_nonce += 1;
-        MultisigResponse::AddRequest(self.request_nonce - 1)
+        MultiSigResponse::new(
+            self.request_nonce - 1,
+            FuncResponse::AddRequest(self.request_nonce - 1),
+        )
     }
 
     /// Add request for multisig and confirm with the pk that added.
-    pub fn add_request_and_confirm(&mut self, request: MultiSigRequest) -> MultisigResponse {
+    pub fn add_request_and_confirm(
+        &mut self,
+        request: MultiSigRequest,
+    ) -> PromiseOrValue<MultiSigResponse> {
         let request_id_resp = self.add_request(request);
-        let id = match request_id_resp {
-            MultisigResponse::AddRequest(id) => id,
-            _ => env::panic_str("Unexpected response"),
-        };
-        let res = self.confirm(id);
-        match res {
-            PromiseOrValue::Value(v) => return v,
-            _ => return request_id_resp,
-        };
+        self.confirm(request_id_resp.request_id)
     }
 
     /// Remove given request and associated confirmations.
@@ -182,7 +171,7 @@ impl Contract {
         self.remove_request(request_id);
     }
 
-    fn execute_request(&mut self, request: MultiSigRequest) -> PromiseOrValue<MultisigResponse> {
+    fn execute_request(&mut self, request: MultiSigRequest) -> PromiseOrValue<FuncResponse> {
         let mut promise = Promise::new(request.receiver_id.clone());
         let receiver_id = request.receiver_id.clone();
         let num_actions = request.actions.len();
@@ -224,14 +213,14 @@ impl Contract {
                 MultiSigRequestAction::SetNumConfirmations { num_confirmations } => {
                     self.assert_one_action_only(receiver_id, num_actions);
                     self.num_confirmations = num_confirmations;
-                    return PromiseOrValue::Value(MultisigResponse::Default(true));
+                    return PromiseOrValue::Value(FuncResponse::Default(true));
                 }
                 MultiSigRequestAction::SetActiveRequestsLimit {
                     active_requests_limit,
                 } => {
                     self.assert_one_action_only(receiver_id, num_actions);
                     self.active_requests_limit = active_requests_limit;
-                    return PromiseOrValue::Value(MultisigResponse::Default(true));
+                    return PromiseOrValue::Value(FuncResponse::Default(true));
                 }
 
                 // Payments
@@ -262,7 +251,7 @@ impl Contract {
                     );
                     let id =
                         res.unwrap_or_else(|_| env::panic_str("Failed to create escrow payment"));
-                    return PromiseOrValue::Value(MultisigResponse::EscrowPayment(id));
+                    return PromiseOrValue::Value(FuncResponse::EscrowPayment(id.into()));
                 }
             };
         }
@@ -271,7 +260,7 @@ impl Contract {
 
     /// Confirm given request with given signing key.
     /// If with this, there has been enough confirmation, a promise with request will be scheduled.
-    pub fn confirm(&mut self, request_id: RequestId) -> PromiseOrValue<MultisigResponse> {
+    pub fn confirm(&mut self, request_id: RequestId) -> PromiseOrValue<MultiSigResponse> {
         self.assert_valid_request(request_id);
         let member = self
             .current_member()
@@ -286,11 +275,20 @@ impl Contract {
             /********************************
             NOTE: If the tx execution fails for any reason, the request and confirmations are removed already, so the client has to start all over
             ********************************/
-            self.execute_request(request)
+            let ret = self.execute_request(request);
+            match ret {
+                PromiseOrValue::Promise(p) => p.into(),
+                PromiseOrValue::Value(v) => {
+                    PromiseOrValue::Value(MultiSigResponse::new(request_id, v))
+                }
+            }
         } else {
             confirmations.insert(member.to_string());
             self.confirmations.insert(&request_id, &confirmations);
-            PromiseOrValue::Value(MultisigResponse::Default(true))
+            PromiseOrValue::Value(MultiSigResponse::new(
+                request_id,
+                FuncResponse::Default(true),
+            ))
         }
     }
 
@@ -461,7 +459,6 @@ mod tests {
     use near_sdk::{testing_env, PublicKey};
     use near_sdk::{AccountId, VMContext};
     use std::convert::TryFrom;
-    use std::fmt::{Debug, Error, Formatter};
 
     use super::*;
 
@@ -551,11 +548,8 @@ mod tests {
                 amount: amount.into(),
             }],
         };
-        let request_id = if let MultisigResponse::AddRequest(a) = c.add_request(request.clone()) {
-            a
-        } else {
-            panic!("Expected AddRequest");
-        };
+        let request_id = c.add_request(request.clone()).request_id;
+
         assert_eq!(c.get_request(request_id), request);
         assert_eq!(c.list_request_ids(), vec![request_id]);
         c.confirm(request_id);
@@ -592,12 +586,13 @@ mod tests {
                 amount: amount.into(),
             }],
         };
-        let request_id = c.add_request_and_confirm(request.clone());
-        let request_id = match request_id {
-            MultisigResponse::AddRequest(a) => a,
-            MultisigResponse::Default(bool) => panic!("Expected AddRequest, got {:?}", bool),
-            MultisigResponse::EscrowPayment(_) => todo!(),
+        let ret = c.add_request_and_confirm(request.clone());
+        let request_id = if let PromiseOrValue::Value(v) = ret {
+            v.request_id
+        } else {
+            panic!("Expected value");
         };
+
         assert_eq!(c.get_request(request_id), request);
         assert_eq!(c.list_request_ids(), vec![request_id]);
         // c.confirm(request_id);
@@ -709,18 +704,14 @@ mod tests {
             amount
         ));
         let mut c = Contract::new(members(), 1);
-        let request_id = c.add_request(MultiSigRequest {
-            receiver_id: alice(),
-            actions: vec![MultiSigRequestAction::SetNumConfirmations {
-                num_confirmations: 2,
-            }],
-        });
-
-        let request_id = if let MultisigResponse::AddRequest(id) = request_id {
-            id
-        } else {
-            panic!("wrong response");
-        };
+        let request_id = c
+            .add_request(MultiSigRequest {
+                receiver_id: alice(),
+                actions: vec![MultiSigRequestAction::SetNumConfirmations {
+                    num_confirmations: 2,
+                }],
+            })
+            .request_id;
 
         c.confirm(request_id);
         assert_eq!(c.num_confirmations, 2);
@@ -735,17 +726,14 @@ mod tests {
             amount
         ));
         let mut c = Contract::new(members(), 3);
-        let request_id = c.add_request(MultiSigRequest {
-            receiver_id: bob(),
-            actions: vec![MultiSigRequestAction::Transfer {
-                amount: amount.into(),
-            }],
-        });
-        let request_id = if let MultisigResponse::AddRequest(id) = request_id {
-            id
-        } else {
-            panic!("wrong response");
-        };
+        let request_id = c
+            .add_request(MultiSigRequest {
+                receiver_id: bob(),
+                actions: vec![MultiSigRequestAction::Transfer {
+                    amount: amount.into(),
+                }],
+            })
+            .request_id;
 
         assert_eq!(c.requests.len(), 1);
         assert_eq!(c.confirmations.get(&request_id).unwrap().len(), 0);
@@ -763,17 +751,14 @@ mod tests {
             amount
         ));
         let mut c = Contract::new(members(), 3);
-        let request_id = c.add_request(MultiSigRequest {
-            receiver_id: bob(),
-            actions: vec![MultiSigRequestAction::Transfer {
-                amount: amount.into(),
-            }],
-        });
-        let request_id = if let MultisigResponse::AddRequest(id) = request_id {
-            id
-        } else {
-            panic!("wrong response");
-        };
+        let request_id = c
+            .add_request(MultiSigRequest {
+                receiver_id: bob(),
+                actions: vec![MultiSigRequestAction::Transfer {
+                    amount: amount.into(),
+                }],
+            })
+            .request_id;
         c.delete_request(request_id);
     }
 
@@ -785,18 +770,14 @@ mod tests {
             amount
         ));
         let mut c = Contract::new(members(), 3);
-        let request_id = c.add_request(MultiSigRequest {
-            receiver_id: bob(),
-            actions: vec![MultiSigRequestAction::Transfer {
-                amount: amount.into(),
-            }],
-        });
-
-        let request_id = if let MultisigResponse::AddRequest(id) = request_id {
-            id
-        } else {
-            panic!("wrong response");
-        };
+        let request_id = c
+            .add_request(MultiSigRequest {
+                receiver_id: bob(),
+                actions: vec![MultiSigRequestAction::Transfer {
+                    amount: amount.into(),
+                }],
+            })
+            .request_id;
 
         c.confirm(request_id);
         testing_env!(context_with_key_future(
@@ -817,17 +798,14 @@ mod tests {
             amount
         ));
         let mut c = Contract::new(members(), 3);
-        let request_id = c.add_request(MultiSigRequest {
-            receiver_id: bob(),
-            actions: vec![MultiSigRequestAction::Transfer {
-                amount: amount.into(),
-            }],
-        });
-        let request_id = if let MultisigResponse::AddRequest(id) = request_id {
-            id
-        } else {
-            panic!("wrong response");
-        };
+        let request_id = c
+            .add_request(MultiSigRequest {
+                receiver_id: bob(),
+                actions: vec![MultiSigRequestAction::Transfer {
+                    amount: amount.into(),
+                }],
+            })
+            .request_id;
         testing_env!(context_with_key(
             PublicKey::try_from(TEST_KEY.to_vec()).unwrap(),
             amount
