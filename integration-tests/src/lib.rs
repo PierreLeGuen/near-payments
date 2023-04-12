@@ -128,6 +128,16 @@ mod tests {
             .await?
             .unwrap();
 
+        alice
+            .call(ft_contract.id(), "ft_transfer")
+            .args_json(
+                json!({ "receiver_id": payments_contract.id(), "amount": (40 * ONE_NEAR).to_string() }),
+            )
+            .deposit(ONE_YOCTO)
+            .transact()
+            .await?
+            .unwrap();
+
         println!("initializing contract");
         contract_wrapper
             .init(
@@ -189,8 +199,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_escrow_transfer_above_account_balance_should_panic() -> Result<()> {
-        let (contract_wrapper, _, caller, to) = init().await?;
+    #[should_panic = "Not enough NEAR balance"]
+    async fn test_escrow_transfer_above_account_balance() {
+        let (contract_wrapper, _, caller, to) = init().await.unwrap();
 
         let request = MultiSigRequest {
             receiver_id: workspace_acc_id_to_sdk_id(&to),
@@ -204,7 +215,8 @@ mod tests {
 
         let ret = contract_wrapper
             .add_request_and_confirm(&caller, request)
-            .await?
+            .await
+            .unwrap()
             .expect("no response");
 
         let _id = match ret.response {
@@ -224,17 +236,14 @@ mod tests {
 
         let ret = contract_wrapper
             .add_request_and_confirm(&caller, request)
-            .await?
+            .await
+            .unwrap()
             .expect("no response");
 
         let _id = match ret.response {
             FuncResponse::EscrowPayment(p) => p,
             _ => panic!("unexpected response"),
         };
-
-        // contract.claim_payment(to, id).await?;
-
-        Ok(())
     }
 
     #[tokio::test]
@@ -257,16 +266,16 @@ mod tests {
             .await?
             .expect("no response");
 
-        let id = match ret.response {
+        let payment_id = match ret.response {
             FuncResponse::EscrowPayment(id) => dbg!(id),
             _ => panic!("unexpected response"),
         };
 
         // let p = contract.get_payments(caller, id).await?;
 
-        contract_wrapper.claim_payment(&to, id).await?;
+        contract_wrapper.claim_payment(&to, payment_id).await?;
 
-        let b: U128 = to
+        let balance: U128 = to
             .call(ft_contract.id(), "ft_balance_of")
             .args_json(json!({
                 "account_id": to.id()
@@ -276,7 +285,7 @@ mod tests {
             .unwrap()
             .json()?;
 
-        assert_eq!(b.0, 30 * ONE_NEAR);
+        assert_eq!(balance.0, 30 * ONE_NEAR);
 
         Ok(())
     }
