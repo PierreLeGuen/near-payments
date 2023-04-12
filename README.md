@@ -1,3 +1,3 @@
-# Questions
+# NEAR payments contract
 
-What about returning only MultisigResponse, no promise or value.
+Multisig wallet with advanced payment options
