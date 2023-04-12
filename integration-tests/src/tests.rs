@@ -61,11 +61,7 @@ impl ContractWrapper {
         Ok(r)
     }
 
-    async fn get_payments(
-        &self,
-        caller: &Account,
-        payment_id: Base58CryptoHash,
-    ) -> Result<Vec<(CryptoHash, EscrowTransfer)>> {
+    async fn get_payments(&self, caller: &Account) -> Result<Vec<(CryptoHash, EscrowTransfer)>> {
         let v: Vec<(CryptoHash, EscrowTransfer)> = caller
             .call(self.contract.id(), "get_payments")
             .transact()
@@ -136,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .unwrap();
 
-    let b: U128 = bob
+    let _b: U128 = bob
         .call(wrap_near_contract.id(), "ft_balance_of")
         .args_json(json!({
             "account_id": contract.id()
@@ -243,7 +239,7 @@ async fn test_escrow_transfer_above_account_balance_should_panic(
         .await?
         .expect("no response");
 
-    let id = match ret.response {
+    let _id = match ret.response {
         FuncResponse::EscrowPayment(p) => p,
         _ => panic!("unexpected response"),
     };
@@ -263,7 +259,7 @@ async fn test_escrow_transfer_above_account_balance_should_panic(
         .await?
         .expect("no response");
 
-    let id = match ret.response {
+    let _id = match ret.response {
         FuncResponse::EscrowPayment(p) => p,
         _ => panic!("unexpected response"),
     };

@@ -1,7 +1,7 @@
 use near_sdk::json_types::Base58CryptoHash;
 
 use crate::{
-    common::errors::{self, ContractError},
+    common::errors::{ContractError},
     *,
 };
 

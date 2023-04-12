@@ -1,6 +1,6 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::json_types::{Base58CryptoHash, Base64VecU8, U128};
-use near_sdk::{env, serde_json, CryptoHash, Promise};
+use near_sdk::{env, serde_json, CryptoHash};
 use near_sdk::{
     serde::{Deserialize, Serialize},
     AccountId, PublicKey,
