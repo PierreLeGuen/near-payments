@@ -1,8 +1,8 @@
 [workspace]
 members = [
     "models",
+    "integration-tests",
     "contract",
-    "integration-tests"
 ]
 
 [profile.release]
