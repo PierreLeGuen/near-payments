@@ -10,15 +10,6 @@ use near_units::parse_near;
 #[near_bindgen]
 impl Contract {
     #[handle_result]
-    pub fn get_payments(&self) -> Result<Vec<(CryptoHash, EscrowTransfer)>, String> {
-        let mut payments = vec![];
-        for (k, v) in self.escrow_transfers.iter() {
-            payments.push((k, v));
-        }
-        Ok(payments)
-    }
-
-    #[handle_result]
     #[payable]
     pub fn claim_payment(
         &mut self,

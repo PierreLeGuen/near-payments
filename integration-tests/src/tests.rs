@@ -89,6 +89,8 @@ impl ContractWrapper {
     }
 }
 
+// TODO(pierre): Switch to tokio testing API. Current solution doesn't scale.
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let wasm_arg: &str = &(env::args().nth(1).unwrap());
