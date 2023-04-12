@@ -98,6 +98,18 @@ pub enum FuncResponse {
 #[derive(Debug, BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
 #[cfg_attr(test, derive(PartialEq, Clone))]
 #[serde(crate = "near_sdk::serde")]
+pub struct EscrowTransfer {
+    pub id: CryptoHash,
+    pub receiver_id: AccountId,
+    pub amount: u128,
+    pub label: String,
+    pub is_locked: bool,
+    pub token_account: Option<AccountId>,
+}
+
+#[derive(Debug, BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
+#[cfg_attr(test, derive(PartialEq, Clone))]
+#[serde(crate = "near_sdk::serde")]
 pub struct MultiSigResponse {
     pub request_id: RequestId,
     pub response: FuncResponse,

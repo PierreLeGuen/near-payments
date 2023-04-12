@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
-use escrow::EscrowTransfer;
 use models::*;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::{LookupMap, UnorderedMap, UnorderedSet};
 
+use near_sdk::json_types::U128;
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{
     env, ext_contract, near_bindgen, serde_json, AccountId, BorshStorageKey, CryptoHash,
@@ -29,6 +29,17 @@ const MULTISIG_METHOD_NAMES: &str = "add_request,delete_request,confirm,add_and_
 #[ext_contract(ext_nep141_token)]
 pub trait ExtNep141Token {
     fn ft_balance_of(&mut self, account_id: AccountId) -> Promise;
+    fn ft_transfer(
+        &mut self,
+        receiver_id: AccountId,
+        amount: U128,
+        memo: Option<String>,
+    ) -> Promise;
+    fn storage_deposit(
+        &mut self,
+        account_id: AccountId,
+        registration_only: Option<bool>,
+    ) -> Promise;
 }
 
 /// An internal request wrapped with the signer_pk and added timestamp to determine num_requests_pk and prevent against malicious key holder gas attacks
@@ -264,9 +275,17 @@ impl Contract {
                     token_id,
                     label,
                     is_cancellable,
-                } => ext_nep141_token::ext(token_id)
+                } => ext_nep141_token::ext(token_id.clone())
                     .ft_balance_of(env::current_account_id())
-                    .then(Self::ext(env::current_account_id()).callback_create_ft_escrow()),
+                    .then(
+                        Self::ext(env::current_account_id()).callback_create_ft_escrow(
+                            receiver_id,
+                            amount.into(),
+                            label,
+                            is_cancellable,
+                            token_id,
+                        ),
+                    ),
             };
         }
         promise.into()

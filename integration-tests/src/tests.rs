@@ -61,13 +61,21 @@ impl ContractWrapper {
         Ok(r)
     }
 
-    async fn claim_payment(&self, caller: &Account, payment_id: Base58CryptoHash) -> Result<()> {
-        let v: Vec<CryptoHash> = caller
+    async fn get_payments(
+        &self,
+        caller: &Account,
+        payment_id: Base58CryptoHash,
+    ) -> Result<Vec<(CryptoHash, EscrowTransfer)>> {
+        let v: Vec<(CryptoHash, EscrowTransfer)> = caller
             .call(self.contract.id(), "get_payments")
             .transact()
             .await?
             .json()?;
 
+        Ok(v)
+    }
+
+    async fn claim_payment(&self, caller: &Account, payment_id: Base58CryptoHash) -> Result<()> {
         caller
             .call(self.contract.id(), "claim_payment")
             .args_json(json!({ "payment_id": payment_id }))
@@ -136,13 +144,11 @@ async fn main() -> anyhow::Result<()> {
         .unwrap()
         .json()?;
 
-    dbg!(b);
-
     println!("initializing contract");
     contract_wrapper
         .init(
             vec![MultisigMember::Account {
-                account_id: workspace_acc_id_to_sdk_id(alice.id()),
+                account_id: workspace_acc_id_to_sdk_id(&alice),
             }],
             1,
         )
@@ -193,7 +199,7 @@ async fn test_escrow_transfer(
     let request = MultiSigRequest {
         receiver_id: AccountId::new_unchecked(to.id().to_string()),
         actions: vec![MultiSigRequestAction::NearEscrowTransfer {
-            receiver_id: workspace_acc_id_to_sdk_id(to.id()),
+            receiver_id: workspace_acc_id_to_sdk_id(to),
             amount: ONE_NEAR.into(),
             label: "test".to_string(),
             is_cancellable: true,
@@ -223,7 +229,7 @@ async fn test_escrow_transfer_above_account_balance_should_panic(
     let request = MultiSigRequest {
         receiver_id: AccountId::new_unchecked(to.id().to_string()),
         actions: vec![MultiSigRequestAction::NearEscrowTransfer {
-            receiver_id: workspace_acc_id_to_sdk_id(to.id()),
+            receiver_id: workspace_acc_id_to_sdk_id(to),
             amount: (90 * ONE_NEAR).into(),
             label: "test".to_string(),
             is_cancellable: true,
@@ -243,7 +249,7 @@ async fn test_escrow_transfer_above_account_balance_should_panic(
     let request = MultiSigRequest {
         receiver_id: AccountId::new_unchecked(to.id().to_string()),
         actions: vec![MultiSigRequestAction::NearEscrowTransfer {
-            receiver_id: workspace_acc_id_to_sdk_id(to.id()),
+            receiver_id: workspace_acc_id_to_sdk_id(to),
             amount: (90 * ONE_NEAR).into(),
             label: "test".to_string(),
             is_cancellable: true,
@@ -272,13 +278,13 @@ async fn test_ft_escrow_transfer(
     to: &Account,
 ) -> Result<()> {
     let request = MultiSigRequest {
-        receiver_id: AccountId::new_unchecked(to.id().to_string()),
+        receiver_id: workspace_acc_id_to_sdk_id(to),
         actions: vec![MultiSigRequestAction::FTEscrowTransfer {
-            receiver_id: workspace_acc_id_to_sdk_id(to.id()),
-            amount: (90 * ONE_NEAR).into(),
+            receiver_id: workspace_acc_id_to_sdk_id(to),
+            amount: (30 * ONE_NEAR).into(),
             label: "test".to_string(),
             is_cancellable: true,
-            token_id: workspace_acc_id_to_sdk_id(ft_contract.id()),
+            token_id: workspace_acc_id_to_sdk_id(ft_contract),
         }],
     };
 
@@ -288,16 +294,30 @@ async fn test_ft_escrow_transfer(
         .expect("no response");
 
     let id = match ret.response {
-        FuncResponse::Balance(b) => dbg!(b),
+        FuncResponse::EscrowPayment(id) => dbg!(id),
         _ => panic!("unexpected response"),
     };
 
-    // contract.claim_payment(to, id).await?;
+    // let p = contract.get_payments(caller, id).await?;
+
+    contract.claim_payment(to, id).await?;
+
+    let b: U128 = to
+        .call(ft_contract.id(), "ft_balance_of")
+        .args_json(json!({
+            "account_id": to.id()
+        }))
+        .transact()
+        .await?
+        .unwrap()
+        .json()?;
+
+    assert_eq!(b.0, 30 * ONE_NEAR);
 
     Ok(())
 }
 
 // Helper function to convert workspaces::AccountId to near_sdk::AccountId
-fn workspace_acc_id_to_sdk_id(acc_id: &workspaces::AccountId) -> near_sdk::AccountId {
-    near_sdk::AccountId::new_unchecked(acc_id.to_string())
+fn workspace_acc_id_to_sdk_id(acc: &workspaces::Account) -> near_sdk::AccountId {
+    near_sdk::AccountId::new_unchecked(acc.id().to_string())
 }
