@@ -10,7 +10,7 @@ pub enum ContractError {
         expected: Balance,
         received: Balance,
     },
-    EscrowTransferNotFound,
+    EscrowTransferNotFound(String),
     NotAuthorized,
     NearTransferFailed,
 }

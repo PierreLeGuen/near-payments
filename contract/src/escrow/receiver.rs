@@ -8,16 +8,26 @@ use crate::{
 #[near_bindgen]
 impl Contract {
     #[handle_result]
+    pub fn get_payments(&self) -> Result<Vec<CryptoHash>, String> {
+        let mut payments = vec![];
+        for (k, _) in self.escrow_transfers.iter() {
+            payments.push(k);
+        }
+        Ok(payments)
+    }
+
+    #[handle_result]
     #[payable]
     pub fn claim_payment(
         &mut self,
         payment_id: Base58CryptoHash,
     ) -> Result<Promise, ContractError> {
         check_deposit(ONE_YOCTO)?;
+
         let p = self
             .escrow_transfers
             .get(&payment_id.into())
-            .ok_or(ContractError::EscrowTransferNotFound)?;
+            .ok_or_else(|| ContractError::EscrowTransferNotFound("in claim payment".into()))?;
 
         // assert called by receiver
         if env::predecessor_account_id() != p.receiver_id {
@@ -44,7 +54,7 @@ impl Contract {
         let p = self
             .escrow_transfers
             .get(&payment_id.into())
-            .ok_or(ContractError::EscrowTransferNotFound)?;
+            .ok_or_else(|| ContractError::EscrowTransferNotFound("in callback".into()))?;
 
         self.near_committed_balance -= p.amount;
 

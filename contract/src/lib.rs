@@ -7,8 +7,8 @@ use near_sdk::collections::{LookupMap, UnorderedMap, UnorderedSet};
 
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{
-    env, near_bindgen, serde_json, AccountId, BorshStorageKey, CryptoHash, PanicOnDefault, Promise,
-    PromiseOrValue,
+    env, ext_contract, near_bindgen, serde_json, AccountId, BorshStorageKey, CryptoHash,
+    PanicOnDefault, Promise, PromiseOrValue,
 };
 
 pub mod common;
@@ -25,6 +25,11 @@ const ACTIVE_REQUESTS_LIMIT: u32 = 12;
 
 /// Default set of methods that access key should have.
 const MULTISIG_METHOD_NAMES: &str = "add_request,delete_request,confirm,add_and_confirm_request";
+
+#[ext_contract(ext_nep141_token)]
+pub trait ExtNep141Token {
+    fn ft_balance_of(&mut self, account_id: AccountId) -> Promise;
+}
 
 /// An internal request wrapped with the signer_pk and added timestamp to determine num_requests_pk and prevent against malicious key holder gas attacks
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
@@ -237,7 +242,7 @@ impl Contract {
 
                     promise.transfer(amount.into())
                 }
-                MultiSigRequestAction::EscrowTransfer {
+                MultiSigRequestAction::NearEscrowTransfer {
                     receiver_id,
                     amount,
                     label,
@@ -253,6 +258,15 @@ impl Contract {
                         res.unwrap_or_else(|_| env::panic_str("Failed to create escrow payment"));
                     return PromiseOrValue::Value(FuncResponse::EscrowPayment(id.into()));
                 }
+                MultiSigRequestAction::FTEscrowTransfer {
+                    receiver_id,
+                    amount,
+                    token_id,
+                    label,
+                    is_cancellable,
+                } => ext_nep141_token::ext(token_id)
+                    .ft_balance_of(env::current_account_id())
+                    .then(Self::ext(env::current_account_id()).callback_create_ft_escrow()),
             };
         }
         promise.into()
@@ -409,6 +423,10 @@ impl Contract {
         self.assert_self_request(receiver_id);
         assert(num_actions == 1, "This method should be a separate request");
     }
+
+    /*******
+     * Callback functions
+     */
 
     /********************************
     View methods

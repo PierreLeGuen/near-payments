@@ -61,9 +61,17 @@ pub enum MultiSigRequestAction {
     /// Transfers given amount to receiver.
     Transfer { amount: U128 },
     /// NEAR Escrow transfer
-    EscrowTransfer {
+    NearEscrowTransfer {
         receiver_id: AccountId,
         amount: U128,
+        label: String,
+        is_cancellable: bool,
+    },
+    /// FT Escrow transfer
+    FTEscrowTransfer {
+        receiver_id: AccountId,
+        amount: U128,
+        token_id: AccountId,
         label: String,
         is_cancellable: bool,
     },
@@ -84,6 +92,7 @@ pub enum FuncResponse {
     AddRequest(RequestId),
     Default(bool),
     EscrowPayment(Base58CryptoHash),
+    Balance(U128),
 }
 
 #[derive(Debug, BorshDeserialize, BorshSerialize, Serialize, Deserialize)]

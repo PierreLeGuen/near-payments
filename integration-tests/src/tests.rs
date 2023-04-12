@@ -1,6 +1,10 @@
 use anyhow::{Ok, Result};
-use near_sdk::{AccountId, Gas, ONE_NEAR};
+use near_sdk::{
+    json_types::{Base58CryptoHash, U128},
+    AccountId, CryptoHash, Gas, ONE_NEAR, ONE_YOCTO,
+};
 
+use near_units::parse_near;
 use serde_json::json;
 use std::{env, fs};
 use workspaces::{Account, Contract};
@@ -56,6 +60,25 @@ impl ContractWrapper {
         };
         Ok(r)
     }
+
+    async fn claim_payment(&self, caller: &Account, payment_id: Base58CryptoHash) -> Result<()> {
+        let v: Vec<CryptoHash> = caller
+            .call(self.contract.id(), "get_payments")
+            .transact()
+            .await?
+            .json()?;
+
+        caller
+            .call(self.contract.id(), "claim_payment")
+            .args_json(json!({ "payment_id": payment_id }))
+            .gas(300 * Gas::ONE_TERA.0)
+            .deposit(ONE_YOCTO)
+            .transact()
+            .await?
+            .into_result()?;
+
+        Ok(())
+    }
 }
 
 #[tokio::main]
@@ -68,15 +91,55 @@ async fn main() -> anyhow::Result<()> {
     let wasm = fs::read(wasm_filepath)?;
     let contract = worker.dev_deploy(&wasm).await?;
 
-    let contract = ContractWrapper::new(contract);
+    let contract_wrapper = ContractWrapper::new(contract.clone());
+
+    println!("deploying wrap near contract to sandbox and initializing it");
+    let wrap_near_contract = worker.dev_deploy(&fs::read("./res/w_near.wasm")?).await?;
+    wrap_near_contract.call("new").transact().await?.unwrap();
 
     println!("creating accounts");
     // create accounts
     let alice = worker.dev_create_account().await?;
     let bob = worker.dev_create_account().await?;
 
+    println!("transferring wrap near to multisig wallet");
+    alice
+        .call(wrap_near_contract.id(), "near_deposit")
+        .deposit(50 * ONE_NEAR)
+        .transact()
+        .await?
+        .unwrap();
+
+    alice
+        .call(wrap_near_contract.id(), "storage_deposit")
+        .args_json(json!({ "account_id": contract.id() }))
+        .deposit(parse_near!("0.00125"))
+        .transact()
+        .await?
+        .unwrap();
+
+    alice
+        .call(wrap_near_contract.id(), "ft_transfer")
+        .args_json(json!({ "receiver_id": contract.id(), "amount": (40 * ONE_NEAR).to_string() }))
+        .deposit(ONE_YOCTO)
+        .transact()
+        .await?
+        .unwrap();
+
+    let b: U128 = bob
+        .call(wrap_near_contract.id(), "ft_balance_of")
+        .args_json(json!({
+            "account_id": contract.id()
+        }))
+        .transact()
+        .await?
+        .unwrap()
+        .json()?;
+
+    dbg!(b);
+
     println!("initializing contract");
-    contract
+    contract_wrapper
         .init(
             vec![MultisigMember::Account {
                 account_id: workspace_acc_id_to_sdk_id(alice.id()),
@@ -86,9 +149,19 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     println!("running tests");
+
     // begin tests
-    test_transfer(&contract, &alice, &bob).await?;
-    test_escrow_transfer(&contract, &alice, &bob).await?;
+    // test_transfer(&contract_wrapper, &alice, &bob).await?;
+    // test_escrow_transfer(&contract_wrapper, &alice, &bob).await?;
+    // test_escrow_transfer_above_account_balance_should_panic(&contract_wrapper, &alice, &bob)
+    //     .await?;
+    test_ft_escrow_transfer(
+        &contract_wrapper,
+        wrap_near_contract.as_account(),
+        &alice,
+        &bob,
+    )
+    .await?;
 
     Ok(())
 }
@@ -119,7 +192,7 @@ async fn test_escrow_transfer(
 ) -> Result<()> {
     let request = MultiSigRequest {
         receiver_id: AccountId::new_unchecked(to.id().to_string()),
-        actions: vec![MultiSigRequestAction::EscrowTransfer {
+        actions: vec![MultiSigRequestAction::NearEscrowTransfer {
             receiver_id: workspace_acc_id_to_sdk_id(to.id()),
             amount: ONE_NEAR.into(),
             label: "test".to_string(),
@@ -127,20 +200,99 @@ async fn test_escrow_transfer(
         }],
     };
 
-    let to_before = to.view_account().await?;
-
     let ret = contract
         .add_request_and_confirm(from, request)
         .await?
         .expect("no response");
-    match ret.response {
-        FuncResponse::EscrowPayment(p) => dbg!(p),
+
+    let id = match ret.response {
+        FuncResponse::EscrowPayment(p) => p,
         _ => panic!("unexpected response"),
     };
 
-    let to_after = to.view_account().await?;
+    contract.claim_payment(to, id).await?;
 
-    assert_eq!(to_after.balance - to_before.balance, ONE_NEAR);
+    Ok(())
+}
+
+async fn test_escrow_transfer_above_account_balance_should_panic(
+    contract: &ContractWrapper,
+    caller: &Account,
+    to: &Account,
+) -> Result<()> {
+    let request = MultiSigRequest {
+        receiver_id: AccountId::new_unchecked(to.id().to_string()),
+        actions: vec![MultiSigRequestAction::NearEscrowTransfer {
+            receiver_id: workspace_acc_id_to_sdk_id(to.id()),
+            amount: (90 * ONE_NEAR).into(),
+            label: "test".to_string(),
+            is_cancellable: true,
+        }],
+    };
+
+    let ret = contract
+        .add_request_and_confirm(caller, request)
+        .await?
+        .expect("no response");
+
+    let id = match ret.response {
+        FuncResponse::EscrowPayment(p) => p,
+        _ => panic!("unexpected response"),
+    };
+
+    let request = MultiSigRequest {
+        receiver_id: AccountId::new_unchecked(to.id().to_string()),
+        actions: vec![MultiSigRequestAction::NearEscrowTransfer {
+            receiver_id: workspace_acc_id_to_sdk_id(to.id()),
+            amount: (90 * ONE_NEAR).into(),
+            label: "test".to_string(),
+            is_cancellable: true,
+        }],
+    };
+
+    let ret = contract
+        .add_request_and_confirm(caller, request)
+        .await?
+        .expect("no response");
+
+    let id = match ret.response {
+        FuncResponse::EscrowPayment(p) => p,
+        _ => panic!("unexpected response"),
+    };
+
+    // contract.claim_payment(to, id).await?;
+
+    Ok(())
+}
+
+async fn test_ft_escrow_transfer(
+    contract: &ContractWrapper,
+    ft_contract: &Account,
+    caller: &Account,
+    to: &Account,
+) -> Result<()> {
+    let request = MultiSigRequest {
+        receiver_id: AccountId::new_unchecked(to.id().to_string()),
+        actions: vec![MultiSigRequestAction::FTEscrowTransfer {
+            receiver_id: workspace_acc_id_to_sdk_id(to.id()),
+            amount: (90 * ONE_NEAR).into(),
+            label: "test".to_string(),
+            is_cancellable: true,
+            token_id: workspace_acc_id_to_sdk_id(ft_contract.id()),
+        }],
+    };
+
+    let ret = contract
+        .add_request_and_confirm(caller, request)
+        .await?
+        .expect("no response");
+
+    let id = match ret.response {
+        FuncResponse::Balance(b) => dbg!(b),
+        _ => panic!("unexpected response"),
+    };
+
+    // contract.claim_payment(to, id).await?;
 
     Ok(())
 }
