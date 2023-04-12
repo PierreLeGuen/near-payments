@@ -290,6 +290,44 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    #[should_panic = "Not enough"]
+    async fn test_ft_escrow_transfer_above_balance() {
+        let (contract_wrapper, ft_contract, caller, to) = init().await.unwrap();
+
+        let request = MultiSigRequest {
+            receiver_id: workspace_acc_id_to_sdk_id(&to),
+            actions: vec![MultiSigRequestAction::FTEscrowTransfer {
+                receiver_id: workspace_acc_id_to_sdk_id(&to),
+                amount: (30 * ONE_NEAR).into(),
+                label: "test".to_string(),
+                is_cancellable: true,
+                token_id: workspace_acc_id_to_sdk_id(ft_contract.as_account()),
+            }],
+        };
+
+        contract_wrapper
+            .add_request_and_confirm(&caller, request)
+            .await
+            .unwrap();
+
+        let request = MultiSigRequest {
+            receiver_id: workspace_acc_id_to_sdk_id(&to),
+            actions: vec![MultiSigRequestAction::FTEscrowTransfer {
+                receiver_id: workspace_acc_id_to_sdk_id(&to),
+                amount: (30 * ONE_NEAR).into(),
+                label: "test".to_string(),
+                is_cancellable: true,
+                token_id: workspace_acc_id_to_sdk_id(ft_contract.as_account()),
+            }],
+        };
+
+        contract_wrapper
+            .add_request_and_confirm(&caller, request)
+            .await
+            .unwrap();
+    }
+
     // Helper function to convert workspaces::AccountId to near_sdk::AccountId
     fn workspace_acc_id_to_sdk_id(acc: &workspaces::Account) -> near_sdk::AccountId {
         near_sdk::AccountId::new_unchecked(acc.id().to_string())
