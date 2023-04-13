@@ -8,7 +8,8 @@ mod tests {
 
     use near_units::parse_near;
     use serde_json::json;
-    use std::fs;
+    use std::{fs, sync::Once};
+    use tracing::info;
     use workspaces::{Account, Contract};
 
     pub use models::*;
@@ -16,6 +17,8 @@ mod tests {
     pub struct ContractWrapper {
         contract: Contract,
     }
+
+    static log_int: Once = Once::new();
 
     impl ContractWrapper {
         fn new(contract: Contract) -> Self {
@@ -95,24 +98,31 @@ mod tests {
     }
 
     async fn init() -> Result<(ContractWrapper, Contract, Account, Account)> {
+        log_int.call_once(|| {
+            // construct a subscriber that prints formatted traces to stdout
+            let subscriber = tracing_subscriber::FmtSubscriber::new();
+            // use that subscriber to process traces emitted after this point
+            tracing::subscriber::set_global_default(subscriber).unwrap();
+        });
+
         let worker = workspaces::sandbox().await?;
 
-        println!("creating accounts");
+        info!("creating accounts");
         let alice = worker.dev_create_account().await?;
         let bob = worker.dev_create_account().await?;
 
-        println!("deploying contracts");
+        info!("deploying contracts");
         let payments_contract = worker
             .dev_deploy(&fs::read(
                 "../target/wasm32-unknown-unknown/release/near_payments.wasm",
             )?)
             .await?;
-        let ft_contract = worker.dev_deploy(&fs::read("../res/w_near.wasm")?).await?;
+        let ft_contract = worker.dev_deploy(&fs::read("./tests/w_near.wasm")?).await?;
         ft_contract.call("new").transact().await?.unwrap();
 
         let contract_wrapper = ContractWrapper::new(payments_contract.clone());
 
-        println!("transferring wrap near to multisig wallet");
+        info!("transferring wrap near to multisig wallet");
         alice
             .call(ft_contract.id(), "near_deposit")
             .deposit(50 * ONE_NEAR)
@@ -138,7 +148,7 @@ mod tests {
             .await?
             .unwrap();
 
-        println!("initializing contract");
+        info!("initializing contract");
         contract_wrapper
             .init(
                 vec![MultisigMember::Account {
@@ -267,7 +277,7 @@ mod tests {
             .expect("no response");
 
         let payment_id = match ret.response {
-            FuncResponse::EscrowPayment(id) => dbg!(id),
+            FuncResponse::EscrowPayment(id) => id,
             _ => panic!("unexpected response"),
         };
 
